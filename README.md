@@ -1,2 +1,2 @@
 # Projects
-Projects for Job Application
+Projects for Job Applications
