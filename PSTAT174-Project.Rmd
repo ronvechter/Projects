@@ -1,0 +1,412 @@
+---
+title: "PSTAT174 Project"
+author: "Ron Vechter"
+date: "5/19/2020"
+output: pdf_document
+---
+
+# Monthly Boston armed robberies Jan1966 - Oct1975  
+There are 118 months in this dataset, so we will leave the last 10 months, or our data for 1975, for model validation.
+```{r, warning=FALSE}
+library(tsdl)
+library(MASS)
+crime_og <- subset(tsdl, 12, "Crime")[[2]]
+crime_ts <- ts(crime_og)
+op <- par(mfrow=c(1,2))
+plot.ts(crime_og, xlab = "Years", main = "Raw Data")
+plot.ts(crime_ts, xlab = "Time (in years)", main = "Time Series Data")
+fit <- lm(crime_ts ~as.numeric(1:length(crime_ts)))
+abline(fit, col = "Red")
+abline(h=mean(crime_ts), col="blue") 
+par(op)
+crime1 <-crime_og[c(1:108)]
+crime2 <- crime_og[c(109:118)]
+crime <- crime_ts[c(1:108)]
+test <- crime_ts[c(109:118)]
+```
+  
+## Immediate observations of train data  
+```{r}
+plot.ts(crime, main = "Data for modeling")
+fit <- lm(crime ~ as.numeric(1:length(crime)))
+abline(fit, col="Red")
+abline(h=mean(crime), col="blue")
+op <- par(mfrow=c(1,2))
+hist(crime, col="light blue", xlab="", main="histogram; crime data")
+acf(crime,lag.max=40, main="ACF of the Crime Data")
+par(op)
+```
+  
+The plot of time series data clearly demonstrates a trend, seems to have unstable variance, and may have some seasonality. It's histogram is clearly skewed to the left, and the acf remains large at large lags and decays slowly, so we need to first perform a transformation to stabilize variance:
+```{r}
+bcTransform <- boxcox(crime ~ as.numeric(1:length(crime)), plotit = F)
+lambda <- bcTransform$x[which(bcTransform$y == max(bcTransform$y))]
+crime.bc <- (1/lambda)*(crime^lambda-1)
+crime.log <- log(crime)
+crime.sq <- sqrt(crime)
+var(crime)
+var(crime.bc)
+var(crime.log) # most stable variance, so we proceed with the log
+var(crime.sq)
+```
+  
+We see that the most stabilized variance is given by the log transformation, so let's look at the histograms and compare our log transformed data to our original data:  
+```{r}
+op <- par(mfrow=c(1,3))
+plot.ts(crime.log, main = "Data after Log Transformation")
+plot.ts(crime, main = "Original Data")
+plot.ts(crime.bc, main = "Data after BC Transform")
+par(op)
+op <- par(mfrow = c(1,3))
+hist(crime.log, breaks = 10, col= "light blue", xlab="", main="histogram; log(U_t)")
+hist(crime, breaks = 10, main = "histogram; Crime")
+hist(crime.bc, breaks = 10, main = "histogram; BC Crime")
+par(op)
+```
+  
+  
+```{r}
+op <- par(mfrow=c(1,2))
+plot.ts(crime.log, main = "Data after Log Transformation")
+plot.ts(crime, main = "Original Data")
+par(op)
+```
+  
+From the graph, we seem to have stabilized variance best represented in the histogram by the log transformation, so we will use that and we will look at the decomposition of this transformed data:  
+```{r, warning=FALSE}
+library(ggplot2)
+library(ggfortify)
+y <- ts(as.ts(crime.log), frequency = 12)
+decomp <- decompose(y)
+plot(decomp)
+```
+  
+We can see from the composition that we have a trend that is nearly linear, a seasonality, and from the leftover data after trend and seasonality are removed, our variance seems similar throughout, so we are happy with the log transformation.  
+  
+## Differencing Crime.log  
+```{r}
+op <- par(mfrow = c(1,2))
+crime.l1 <- diff(crime.log, lag=1)
+plot.ts(crime.l1, main="log differenced at lag 1")
+fit <- lm(crime.l1 ~ as.numeric(1:length(crime.l1)))
+abline(fit, col="red") 
+abline(h=mean(crime.l1), col="blue")
+
+crime.l112 <- diff(crime.l1, lag=12)
+plot.ts(crime.l112, main="differenced at lags 1 & 12")
+fit <- lm(crime.l112 ~ as.numeric(1:length(crime.l112)))
+abline(fit, col="red")
+abline(h=mean(crime.l112), col="blue")
+par(op)
+var(crime.log) # variance before differencing
+mean(crime.l1) # trend removed after differencing at lag 1
+var(crime.l1) # variance decreased so no sign of overdifferencing
+var(crime.l112) # variance increased after differencing at lag 12, implying overdifferencing
+```
+
+  
+## Histogram of transformed and differenced data with normal curve:  
+```{r}
+op <- par(mfrow = c(1,2))
+hist(crime.l1, density=20,breaks=20, col="blue", xlab="", prob=TRUE)
+m <- mean(crime.l1)
+std <- sqrt(var(crime.l1))
+curve( dnorm(x,m,std), add=TRUE )
+hist(crime.l112, density=20,breaks=20, col="blue", xlab="", prob=TRUE)
+m <- mean(crime.l112)
+std <- sqrt(var(crime.l112))
+curve( dnorm(x,m,std), add=TRUE )
+par(op)
+```
+  
+## Choosing Candidate Models
+```{r}
+op <- par(mfrow = c(1,2))
+acf(crime.l1, lag.max = 40, main = "ACF of lag 1")
+pacf(crime.l1, lag.max = 40, main = "PACF of lag 1")
+par(op)
+```
+  
+Based on ACF and PACF analysis, we have the following candidate models to try:  
+- ARIMA (1,1,1) or (2,1,1), so we will test all ARIMA(i,1,j) for i,j between 0 and 4.
+
+## Find the models with lowest AICC: 
+```{r, warning=FALSE}
+library(qpcR)
+for (i in 0:4) {
+  for (j in 0:4) {
+    cat(i, j, (AICc(arima(crime.log, order = c(i,1,j), method = "ML"))), "\n")
+  }
+}
+```
+  
+Three of the lowest AICc models using this analysis are ARIMA(2,1,4), ARIMA(0,1,2), and ARIMA(1,1,1), modeled in the following code. We also ensure that for any coefficients with 0 in their confidence interval, we check the AICc with that coefficient fixed at 0:
+```{r, warning=FALSE}
+fitA <- arima(crime.log, order=c(2,1,4), method="ML")
+fitA
+fitB <- arima(crime.log, order=c(0,1,2), method="ML") # MA2 might be insignificant
+fitB
+AICc(arima(crime.log, order=c(0,1,2),fixed = c(NA,0) , method="ML")) #AICc increased
+fitC <- arima(crime.log, order=c(1,1,1),  method="ML") # AR1 may be insignificant
+fitC
+AICc(arima(crime.log, order=c(1,1,1),fixed = c(0,NA) , method="ML")) #AICc increased
+```
+  
+  
+From our previous modeling, we have our coefficients and can now write out our candidate models, where $Y_t$ = $\nabla_1$ln($U_t$):  
+- **Model A**:  
+(1 + $1.0143_{(0.0830)}$$B$ + $0.8626_{(0.0635)}$$B^2$)$Y_t$ = (1 + $0.7816_{(0.1208)}$$B$ + $0.520_{(0.0111)}$$B^2$ - $0.4784_{(0.1060)}$$B^3$ - $0.2844_{(0.1016)}$$B^4$)$Z_t$  
+And we have $\hat{\sigma^2}_Z$ =  0.035  
+- **Model B**:  
+$Y_t$ = (1 - $0.2982_{(0.0953)}$$B$ - $0.1770_{(0.0941)}$$B^2$)$Z_t$  
+$\hat{\sigma^2}_Z$ = 0.04005  
+- **Model C**:  
+(1 - $0.3522_{(0.1826)}$$B$)$Y_t$ = (1 - $0.6686_{(0.1386)}$$B$)$Z_t$  
+And we have $\hat{\sigma^2}_Z$ = 0.04025  
+  
+```{r, echo=FALSE}
+plot.roots <- function(ar.roots=NULL, ma.roots=NULL, size=2, angles=FALSE, special=NULL, sqecial=NULL,my.pch=1,first.col="blue",second.col="red",main=NULL)
+{xylims <- c(-size,size)
+      omegas <- seq(0,2*pi,pi/500)
+      temp <- exp(complex(real=rep(0,length(omegas)),imag=omegas))
+      plot(Re(temp),Im(temp),typ="l",xlab="x",ylab="y",xlim=xylims,ylim=xylims,main=main)
+      abline(v=0,lty="dotted")
+      abline(h=0,lty="dotted")
+      if(!is.null(ar.roots))
+        {
+          points(Re(1/ar.roots),Im(1/ar.roots),col=first.col,pch=my.pch)
+          points(Re(ar.roots),Im(ar.roots),col=second.col,pch=my.pch)
+        }
+      if(!is.null(ma.roots))
+        {
+          points(Re(1/ma.roots),Im(1/ma.roots),pch="*",cex=1.5,col=first.col)
+          points(Re(ma.roots),Im(ma.roots),pch="*",cex=1.5,col=second.col)
+        }
+      if(angles)
+        {
+          if(!is.null(ar.roots))
+            {
+              abline(a=0,b=Im(ar.roots[1])/Re(ar.roots[1]),lty="dotted")
+              abline(a=0,b=Im(ar.roots[2])/Re(ar.roots[2]),lty="dotted")
+            }
+          if(!is.null(ma.roots))
+            {
+              sapply(1:length(ma.roots), function(j) abline(a=0,b=Im(ma.roots[j])/Re(ma.roots[j]),lty="dotted"))
+            }
+        }
+      if(!is.null(special))
+        {
+          lines(Re(special),Im(special),lwd=2)
+        }
+      if(!is.null(sqecial))
+        {
+          lines(Re(sqecial),Im(sqecial),lwd=2)
+        }
+        }
+```
+  
+
+## Checking stationarity and invertibility:  
+We know that MA(q) is always stationary, and is invertible when $\theta$($z$) = 1 + $\theta_1$$z$ + ... + $\theta_q$$z^q$ != 0 for |$z$| <= 1, ie all roots of the characteristic polynomial $\theta$($z$) are outside the unit circle.  
+We also know that AR(p) is always invertible, and is stationary when it has MA($\infty$) representation, which happens when $\phi$($z$) = 1 - $\phi_1$$z$ - ... - $\phi_p$$z^p$ != 0 for |$z$| <= 1, ie all roots of the characteristic polynomial $\phi$($z$) are outside the unit circle.  
+  
+Let's check our Model B,C for stationarity and invertibility:  
+- For **Model A**, we have an MA part and an AR part. For the MA part, we have $\theta$($z$) = 1 + 0.7816$z$ + 0.520$z^2$ - 0.4784$z^3$ - 0.2844$z^4$. For the AR part, we have $\phi$($z$) = 1 + 1.0143$z$ + 0.8626$z^2$. We will evaluate and plot their roots with the following code:   
+```{r}
+plot.roots(polyroot(c(1,0.7816,0.520,-0.4784,-0.2844)), polyroot(c(1,1.0143,0.8626)), main = "Roots of Model A")
+```  
+It is evident that the AR part does not satisdy that all roots are outside the unit circle, so **Model A is invertible but not stationary**.  
+  
+- For **Model B**, we have a pure MA model, so we just need to check our characteristic polynomial $\theta$($z$) = 1 - 0.2982$z$, - 0.1770$z^2$. We will evaluate and plot their roots with the following code:   
+```{r}
+plot.roots(ma.roots = polyroot(c(1,-0.2982,-0.1770)), main = "Roots of Model B")
+```  
+It is clear that the roots of Model B lie outside the unit circle, so **Model B is stationary and invertible**.  
+  
+- For **Model C**, we once again have both an MA part and an AR part. For the MA part, we have $\theta$($z$) = 1 - 0.6686$z$. For the AR part, we have $\phi$($z$) = 1 - 0.3522$z$. We will evaluate and plot their roots with the following code:  
+```{r}
+plot.roots(polyroot(c(1,-0.3522)), polyroot(c(1,-0.6686)), main = "Roots of Model C")
+```  
+It is clear that the roots of Model C lie outside the unit circle, so **Model C is stationary and invertible**.  
+  
+## Diagnostic Checking  
+```{r}
+resB <- residuals(fitB)
+resC <- residuals(fitC)
+# Histogram of residuals
+op <- par(mfrow = c(1,2))
+hist(resB,density=20,breaks=20, col="blue", xlab="", prob=TRUE)
+mA <- mean(resB)
+stdA <- sqrt(var(resB))
+curve( dnorm(x,m,std), add=TRUE)
+hist(resC,density=20,breaks=20, col="blue", xlab="", prob=TRUE)
+mA <- mean(resC)
+stdA <- sqrt(var(resC))
+curve( dnorm(x,m,std), add=TRUE)
+par(op)
+```  
+  
+```{r}
+op <- par(mfrow = c(1,2))
+plot.ts(resB)
+fittB <- lm(resB ~ as.numeric(1:length(resB))); abline(fittB, col="red")
+abline(h=mean(resB), col="blue")
+plot.ts(resC)
+fittC <- lm(resC ~ as.numeric(1:length(resC))); abline(fittC, col="red")
+abline(h=mean(resC), col="blue")
+par(op)
+```
+  
+```{r}
+op <- par(mfrow = c(1,2))
+qqnorm(resB,main= "Normal Q-Q Plot for Model B")
+qqline(resB,col="blue")
+qqnorm(resC,main= "Normal Q-Q Plot for Model C")
+qqline(resC,col="blue")
+par(op)
+```  
+  
+```{r}
+op <- par(mfrow = c(2,2))
+acf(resB, lag.max=40)
+pacf(resB, lag.max=40)
+acf(resC, lag.max=40)
+pacf(resC, lag.max=40)
+par(op)
+```
+All lags for ACF and PACF of residuals are within the confidence interval, with the exception of lag 33, which is negligibly close.  
+  
+  
+We will run the diagnostic tests with h = sqrt(n) = sqrt(108)
+```{r}
+shapiro.test(resB)
+Box.test(resB, lag = 12, type = c("Box-Pierce"), fitdf = 2)
+Box.test(resB, lag = 12, type = c("Ljung-Box"), fitdf = 2)
+Box.test(resB^2, lag = 12, type = c("Ljung-Box"), fitdf = 0)
+shapiro.test(resC)
+Box.test(resC, lag = 12, type = c("Box-Pierce"), fitdf = 2)
+Box.test(resC, lag = 12, type = c("Ljung-Box"), fitdf = 2)
+Box.test(resC^2, lag = 12, type = c("Ljung-Box"), fitdf = 0)
+```  
+The residuals pass diagnostic checking at the 95% confidence interval since all p-values are greater than 0.05.  
+  
+```{r}
+ar(resB, aic = TRUE, order.max = NULL, method = c("yule-walker"))
+ar(resC, aic = TRUE, order.max = NULL, method = c("yule-walker"))
+```  
+## Models B and C pass Diagnostic Checking  
+The final model for the logarithm transform of the original data ln($U_t$):  
+- follows ARIMA(0,1,2) model $\nabla_1$ln($U_t$) = (1 - 0.2982$B$ - 0.1770$B^2$)$Z_t$  
+$\hat{\sigma^2}_Z$ = 0.04005
+OR  
+- follows ARIMA(1,1,1) model (1 - 0.3522$B$)$\nabla_1$ln($U_t$) = (1 - 0.6686$B$)$Z_t$  
+$\hat{\sigma^2}_Z$ = 0.04025  
+
+## Forecast  
+### Predictions on log of data
+```{r}
+library(forecast)
+pred.trB <- predict(fitB, n.ahead = 10)
+pred.trC <- predict(fitC, n.ahead = 10)
+pred.trB
+pred.trC
+U.trB <- pred.trB$pred + 2*pred.trB$se
+L.trB <- pred.trB$pred - 2*pred.trB$se
+U.trC <- pred.trC$pred + 2*pred.trC$se
+L.trC <- pred.trC$pred - 2*pred.trC$se
+op <- par(mfrow = c(1,2))
+ts.plot(crime.log, xlim = c(1,length(crime.log)+10), ylim = c(min(crime.log), max(U.trB)))
+lines(U.trB, col="blue", lty="dashed")
+lines(L.trB, col="blue", lty="dashed")
+points((length(crime.log)+1):(length(crime.log)+10), pred.trB$pred, col="red")
+ts.plot(crime.log, xlim = c(1,length(crime.log)+10), ylim = c(min(crime.log), max(U.trC)))
+lines(U.trC, col="blue", lty="dashed")
+lines(L.trC, col="blue", lty="dashed")
+points((length(crime.log)+1):(length(crime.log)+10), pred.trC$pred, col="red")
+par(op)
+```  
+### Forecast on original data  
+```{r}
+op <- par(mfrow = c(1,2))
+pred.origB <- exp(pred.trB$pred)
+UB = exp(U.trB)
+LB = exp(L.trB)
+ts.plot(crime1, xlim=c(1,length(crime1)+10), ylim = c(min(crime1),max(UB)))
+lines(UB, col="blue", lty="dashed")
+lines(LB, col="blue", lty="dashed")
+points((length(crime1)+1):(length(crime1)+10), pred.origB, col="red")
+
+pred.origC <- exp(pred.trC$pred)
+UC = exp(U.trC)
+LC = exp(L.trC)
+ts.plot(crime1, xlim=c(1,length(crime1)+10), ylim = c(min(crime1),max(UC)))
+lines(UC, col="blue", lty="dashed")
+lines(LC, col="blue", lty="dashed")
+points((length(crime1)+1):(length(crime1)+10), pred.origC, col="red")
+par(op)
+```  
+  
+### Zoom the plot starting from entry 90  
+```{r}
+op <- par(mfrow = c(1,2))
+ts.plot(crime1, xlim = c(90,length(crime1)+10), ylim = c(180,max(UB)))
+lines(UB, col="blue", lty="dashed")
+lines(LB, col="blue", lty="dashed")
+points((length(crime1)+1):(length(crime1)+10), pred.origB, col="red")
+
+ts.plot(crime1, xlim = c(90,length(crime1)+10), ylim = c(180,max(UC)))
+lines(UC, col="blue", lty="dashed")
+lines(LC, col="blue", lty="dashed")
+points((length(crime1)+1):(length(crime1)+10), pred.origC, col="red")
+par(op)
+```  
+  
+### plot zoomed forecast and true values  
+```{r}
+op <- par(mfrow = c(1,2))
+ts.plot(crime1, xlim = c(90,length(crime1)+10), ylim = c(180,max(UB)), col="red")
+lines(UB, col="blue", lty="dashed")
+lines(LB, col="blue", lty="dashed")
+points((length(crime1)+1):(length(crime1)+10), pred.origB, col="green")
+points((length(crime1)+1):(length(crime1)+10), crime2, col="black")
+
+ts.plot(crime1, xlim = c(90,length(crime1)+10), ylim = c(180,max(UC)), col="red")
+lines(UC, col="blue", lty="dashed")
+lines(LC, col="blue", lty="dashed")
+points((length(crime1)+1):(length(crime1)+10), pred.origC, col="green")
+points((length(crime1)+1):(length(crime1)+10), crime2, col="black")
+par(op)
+```
+
+
+
+```{r}
+# scratch 
+AICc(arima(ctrain.bc, order = c(0,1,0), seasonal = list(order=c(0,1,0), period=12), method = "ML"))
+AICc(arima(ctrain.bc, order = c(0,1,1), seasonal = list(order=c(0,1,0), period=12), method = "ML"))
+AICc(arima(ctrain.bc, order = c(0,1,2), seasonal = list(order=c(0,1,0), period=12), method = "ML"))
+AICc(arima(ctrain.bc, order = c(0,1,3), seasonal = list(order=c(0,1,0), period=12), method = "ML"))
+AICc(arima(ctrain.bc, order = c(0,1,0), seasonal = list(order=c(0,1,1), period=12), method = "ML"))
+# points((length(ctrain)+1):(length(ctrain)+8), ctest, col="black")
+# pred.orig <- InvBoxCox(pred.tr$pred, lambda)
+# U <- InvBoxCox(U.tr, lambda)
+# L <- InvBoxCox(L.tr, lambda)
+```
+
+```{r, eval=FALSE}
+ctest.bc <- (1/lambda)*(ctest^lambda-1)
+
+pred.tr2 <- sarima.for(xdata = ctest.bc, n.ahead = 8, p=0, d=1, q=1, P=2, D=1, Q=1, S=12, fixed = c(NA,0,NA,NA))
+U.tr <- pred.tr$pred + 2*pred.tr$se
+L.tr <- pred.tr$pred - 2*pred.tr$se
+ts.plot(ctest.bc, xlim=c(110,length(ctest.bc)), ylim = c(min(ctest.bc),max(U.tr)))
+lines(U.tr, col="blue", lty="dashed")
+lines(L.tr, col="blue", lty="dashed")
+points((length(ctest.bc)+1):(length(ctest.bc)+8), pred.tr$pred, col="red")
+
+ctest.bc <- (1/lambda)*(ctest^lambda-1)
+points((length(ctrain.bc)+1):(length(ctrain.bc)+8), ctest.bc, col="black")
+```
+
+
+
